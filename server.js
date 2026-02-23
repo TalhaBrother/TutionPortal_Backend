@@ -28,4 +28,4 @@ app.get('/', (req, res) => {
   res.send('Hello World!')
 })
 
-export const handler = serverless(app);
+export default serverless(app);
