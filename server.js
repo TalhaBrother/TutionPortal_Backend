@@ -8,7 +8,7 @@ import authRoute from './routes/routes.js'
 import serverless from "serverless-http";
 
 const app = express()
-const port = 3000
+
 dotenv.config()
 let dbURI = process.env.url
 mongoose.connect(dbURI).then(()=>{
