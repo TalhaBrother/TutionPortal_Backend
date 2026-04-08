@@ -7,15 +7,16 @@ import bcrypt from 'bcrypt'
 import jwt from "jsonwebtoken"
 import dotenv from 'dotenv';
 import upload from '../Multer/upload.js';
+import Notification from '../schema/notification.js'
+import axios from 'axios';
 dotenv.config();
 
 const registerSchema = Joi.object({
     username: Joi.string(),
-    age: Joi.number().integer().min(0).required(),
     contact: Joi.string().pattern(/^[0-9]{10}$/).required(),
     email: Joi.string().email().required(),
     password: Joi.string().min(6).pattern(new RegExp('^[a-zA-Z0-9]{6,30}$')).required(),
-    role: Joi.string().valid('user', 'admin').optional()
+    role: Joi.string().valid('parent', 'admin', 'tutor', 'academy').optional()
 
 }).required()
 const loginSchema = Joi.object({
@@ -57,7 +58,7 @@ authRoute.post('/register', upload.single("profilePic"), async (req, res) => {
     console.log("FILE:", req.file);
 
     try {
-        const { username, age, contact, email, password, role } = req.body;
+        const { username, contact, email, password, role } = req.body;
         const { error } = registerSchema.validate(req.body);
         if (error) {
             return res.send({
@@ -76,10 +77,9 @@ authRoute.post('/register', upload.single("profilePic"), async (req, res) => {
         const saltRounds = process.env.saltRounds
         let hashpassword = await bcrypt.hash(password, parseInt(saltRounds))
         let secretKey = process.env.secretKey
-        const userRole = (role && ['user', 'admin'].includes(role)) ? role : 'user';
+        const userRole = (role && ['parent', 'admin', 'tutor', 'academy'].includes(role)) ? role : 'parent';
         const newUser = new User({
             username,
-            age,
             contact,
             email,
             password: hashpassword,
@@ -93,7 +93,15 @@ authRoute.post('/register', upload.single("profilePic"), async (req, res) => {
         });
 
         await newUser.save()
-        let token = jwt.sign({ id: newUser._id, username, age, contact, email }, secretKey);
+        let token = jwt.sign({ id: newUser._id, username, contact, email }, secretKey);
+        const io = req.app.get('socketio');
+
+        // Send notification to ALL connected clients
+        io.emit('notification', {
+            title: 'New User Alert!',
+            message: `${newUser.username} just joined the portal.`,
+            timestamp: new Date()
+        });
         res.send({
             message: "Successful",
             user: newUser,
@@ -211,7 +219,7 @@ authRoute.get("/user", async (req, res) => {
 })
 authRoute.post("/PostTution", async (req, res) => {
     try {
-        const body= req.body
+        const body = req.body
         const { title, description, subject, location, salary, contact } = body
         if (!title || !description || !subject || !location || !salary || !contact) {
             return res.status(400).send({
@@ -229,12 +237,48 @@ authRoute.post("/PostTution", async (req, res) => {
             contact
         })
         await newTution.save()
+        // Add this before io.emit(...)
+        try {
+            const notification = await Notification.create({
+                title: 'New Tution Post!',
+                message: `${newTution.title} Tution just got posted.`,
+                targetRole: ['admin', 'tutor'],
+                read: false
+            })
+
+            const io = req.app.get('socketio')
+            io.emit('notification', {
+                _id: notification._id,
+                title: notification.title,
+                message: notification.message,
+                targetRole: ['admin', 'tutor'],
+                timestamp: notification.createdAt,
+                read: false
+            })
+        } catch (notifErr) {
+            console.error("Notification failed:", notifErr.message) // silent fail
+        }
         res.send({
             message: "Tution post received successfully!",
             data: body,
             code: 200
         })
-        
+
+        // Notify WhatsApp Bridge
+        try {
+            await axios.post('http://localhost:3001/send-message', {
+                title: newTution.title,
+                subject: newTution.subject,
+                location: newTution.location,
+                salary: newTution.salary,
+                contact: newTution.contact,
+                description: newTution.description
+            });
+            console.log("WhatsApp Bridge notified successfully");
+        } catch (waErr) {
+            console.error("WhatsApp Bridge notification failed:", waErr.message);
+        }
+
     } catch (error) {
         res.status(400).send({
             message: "Failed to post tution!",
@@ -242,4 +286,149 @@ authRoute.post("/PostTution", async (req, res) => {
         })
     }
 })
-export default authRoute;
+
+authRoute.get("/PostTution", async (req, res) => {
+    try {
+        const tutions = await Tution.find().sort({ createdAt: -1 }); // Get newest first
+        res.status(200).json(tutions);
+    } catch (error) {
+        res.status(500).json({ message: "Error fetching data" });
+    }
+});
+authRoute.get("/tutors", async (req, res) => {
+    try {
+        const tutors = await User.find({ role: 'tutor' }).select("-password");
+        res.status(200).json(tutors);
+    } catch (error) {
+        res.status(500).json({ message: "Error fetching tutors" });
+    }
+});
+
+// Get all notifications (latest first) based on role
+authRoute.get("/", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    let query = { targetRole: 'all' }; // Default to public notifications
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.secretKey);
+        const user = await User.findById(decoded.id);
+        if (user) {
+          // Find notifications where user role is in the targetRole array OR it's 'all'
+          query = { 
+            targetRole: { $in: ['all', user.role] }
+          };
+        }
+      } catch (jwtErr) {
+        console.error("Invalid token in notification fetch:", jwtErr.message);
+      }
+    }
+
+    const notifications = await Notification.find(query)
+      .sort({ createdAt: -1 })
+      .limit(20);
+    res.json(notifications);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Add route for tutor application notification
+authRoute.post("/apply", async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(" ")[1];
+        if (!token) {
+            return res.status(401).send({ message: "Unauthorized", code: 401 });
+        }
+        const decoded = jwt.verify(token, process.env.secretKey);
+        const user = await User.findById(decoded.id);
+        
+        if (user.role !== 'tutor' && user.role !== 'academy') {
+            return res.status(403).send({ message: "Only tutors or academies can apply for tuitions.", code: 403 });
+        }
+
+        const { tutorName, tutionTitle } = req.body;
+        if (!tutorName || !tutionTitle) {
+            return res.status(400).send({ message: "Tutor name and tuition title are required!", code: 400 });
+        }
+
+        const notification = await Notification.create({
+            title: user.role === 'academy' ? 'Academy Application Alert' : 'Tutor Application Alert',
+            message: `${user.role === 'academy' ? 'Academy' : 'Tutor'} ${tutorName} applied for the tuition: ${tutionTitle}`,
+            targetRole: ['admin'],
+            read: false
+        });
+
+        const io = req.app.get('socketio');
+        io.emit('notification', {
+            _id: notification._id,
+            title: notification.title,
+            message: notification.message,
+            targetRole: ['admin'],
+            timestamp: notification.createdAt,
+            read: false
+        });
+
+        res.send({ message: "Application received and admin notified!", code: 200 });
+    } catch (error) {
+        console.error("Apply notification error:", error.message);
+        res.status(500).send({ message: "Failed to process application notification.", code: 500 });
+    }
+});
+
+// Add route for parent hire notification
+authRoute.post("/hire", async (req, res) => {
+    try {
+        const token = req.headers.authorization?.split(" ")[1];
+        if (!token) {
+            return res.status(401).send({ message: "Unauthorized", code: 401 });
+        }
+        const decoded = jwt.verify(token, process.env.secretKey);
+        const user = await User.findById(decoded.id);
+        
+        if (user.role !== 'parent' && user.role !== 'academy') {
+            return res.status(403).send({ message: "Only parents or academies can hire tutors.", code: 403 });
+        }
+
+        const { parentName, tutorName } = req.body;
+        if (!parentName || !tutorName) {
+            return res.status(400).send({ message: "Parent name and tutor name are required!", code: 400 });
+        }
+
+        const notification = await Notification.create({
+            title: user.role === 'academy' ? 'Academy Hiring Request' : 'Hiring Request Alert',
+            message: `${user.role === 'academy' ? 'Academy' : 'Parent'} ${parentName} wants to hire Tutor: ${tutorName}`,
+            targetRole: ['admin'],
+            read: false
+        });
+
+        const io = req.app.get('socketio');
+        io.emit('notification', {
+            _id: notification._id,
+            title: notification.title,
+            message: notification.message,
+            targetRole: ['admin'],
+            timestamp: notification.createdAt,
+            read: false
+        });
+
+        res.send({ message: "Hiring request sent to admin!", code: 200 });
+    } catch (error) {
+        console.error("Hire notification error:", error.message);
+        res.status(500).send({ message: "Failed to process hiring notification.", code: 500 });
+    }
+});
+
+// Mark all as read
+authRoute.patch("/mark-read", async (req, res) => {
+  try {
+    await Notification.updateMany({ read: false }, { read: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+export default authRoute

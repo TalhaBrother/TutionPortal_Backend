@@ -14,7 +14,7 @@ let authenticateUser=async(req,res,next)=>{
         if(!decoded){
             return res.status(401).json({message:"Unauthorized access Invalid token!"});
         }
-        let getUser=await User.findById(decoded?._id).select("-password");
+        let getUser=await User.findById(decoded?.id).select("-password");
         if(!getUser){
             return res.status(401).json({message:"Unauthorized access User not found!"});
         }
@@ -28,7 +28,7 @@ let authenticateUser=async(req,res,next)=>{
 userRoute.use(authenticateUser)
 userRoute.get("/",async(req,res)=>{
     try {
-        let user=req.body
+        let user=req.user
         let users=await User.find({email:{$ne:user.email}}).select("-password")
         return res.status(200).json({
             message:"Users fetched successfully",
@@ -55,5 +55,48 @@ userRoute.get("/:id",async(req,res)=>{
         return res.status(500).json({message:"Internal Server Error while fetching user"});
     }
 })
+
+// Update user details
+userRoute.put("/update/:id", async (req, res) => {
+    try {
+        const userId = req.params.id;
+        const updateData = req.body;
+        
+        const updatedUser = await User.findByIdAndUpdate(userId, updateData, { new: true }).select("-password");
+        
+        if (!updatedUser) {
+            return res.status(404).json({ message: "User not found", code: 404 });
+        }
+
+        return res.status(200).json({
+            message: "User updated successfully",
+            data: updatedUser,
+            code: 200
+        });
+    } catch (error) {
+        console.error("Error in PUT /users/update/:id:", error);
+        return res.status(500).json({ message: "Internal Server Error while updating user" });
+    }
+});
+
+// Delete user
+userRoute.delete("/delete/:id", async (req, res) => {
+    try {
+        const userId = req.params.id;
+        const deletedUser = await User.findByIdAndDelete(userId);
+
+        if (!deletedUser) {
+            return res.status(404).json({ message: "User not found", code: 404 });
+        }
+
+        return res.status(200).json({
+            message: "User deleted successfully",
+            code: 200
+        });
+    } catch (error) {
+        console.error("Error in DELETE /users/delete/:id:", error);
+        return res.status(500).json({ message: "Internal Server Error while deleting user" });
+    }
+});
 
 export default userRoute;
