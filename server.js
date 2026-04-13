@@ -28,7 +28,7 @@ mongoose.connect(dbURI).then(()=>{
 app.use(cors())
 app.use(express.json())
 app.set('socketio', io)
-app.use("/user",authRoute)
+app.use("/auth",authRoute)
 app.use("/messages",messageRoute)
 app.use("/users",userRoute)
 app.use("/notifications",authRoute)
