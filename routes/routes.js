@@ -194,16 +194,23 @@ authRoute.post('/admin', async (req, res) => {
 })
 authRoute.get("/user", async (req, res) => {
     try {
-        const token = req.headers.authorization.split(" ")[1];
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).send({ message: "Unauthorized access no token provided!", code: 401 })
+        }
+        const token = authHeader.split(" ")[1];
         if (!token) {
-            res.send({ message: "Unauthorized access no token provided!", code: 401 })
+            return res.status(401).send({ message: "Unauthorized access no token provided!", code: 401 })
         }
         const decoded = jwt.verify(token, process.env.secretKey)
         if (!decoded) {
-            res.send({ message: "Unauthorized access invalid token!", code: 401 })
+            return res.status(401).send({ message: "Unauthorized access invalid token!", code: 401 })
         }
         console.log("Decoded Token", decoded)
         const getUser = await User.findById(decoded?.id)
+        if (!getUser) {
+            return res.status(404).send({ message: "User not found!", code: 404 })
+        }
         res.send({
             message: "User fetched successfully!",
             user: getUser,
@@ -211,6 +218,7 @@ authRoute.get("/user", async (req, res) => {
         })
 
     } catch (error) {
+        console.error("GET /auth/user error:", error.message)
         res.status(400).send({
             message: "Failed to fetch user!",
             code: 400
