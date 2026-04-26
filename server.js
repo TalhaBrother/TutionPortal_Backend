@@ -18,7 +18,7 @@ const io = new Server(httpServer, {
         methods: ["GET", "POST"]
     }
 })
-let dbURI = process.env.url
+let dbURI = process.env.MONGO_URI
 mongoose.connect(dbURI).then(()=>{
     console.log("MongoDB connected!")
     })
